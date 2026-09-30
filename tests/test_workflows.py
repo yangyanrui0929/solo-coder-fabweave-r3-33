@@ -244,8 +244,27 @@ def test_contamination_matrix_is_symmetric_and_cleaning_changes_residuals():
 
 
 def test_takt_uses_intervals_and_reports_duplicate_completions():
+    result = takt_result([0, 10, 10], 0, 20)
+    assert result.takt == 10 and result.interval_count == 1 and result.duplicate_count == 1
+
+
+def test_takt_uses_half_open_window_and_excludes_pre_window_completions():
+    # A completion exactly at the end belongs to the next window.
     result = takt_result([0, 10, 10, 20], 0, 20)
-    assert result.takt == 10 and result.interval_count == 2 and result.duplicate_count == 1
+    assert result.takt == 10 and result.completion_count == 2 and result.interval_count == 1
+    assert result.duplicate_count == 1
+    # The start boundary is included.
+    result = takt_result([0, 0, 10], 0, 20)
+    assert result.takt == 10 and result.completion_count == 2 and result.duplicate_count == 1
+    # Completions before the query window must never stretch the takt span.
+    result = takt_result([-100, -50, 10, 10, 20], 10, 30)
+    assert result.completion_count == 2 and result.duplicate_count == 1
+    assert result.takt == 10 and result.interval_count == 1
+    # Fewer than two unique instants inside the window is insufficient sample.
+    assert takt_result([-5, 5, 5], 0, 10).takt is None
+    assert takt_result([-5], 0, 10).completion_count == 0
+    with pytest.raises(ValueError):
+        takt_result([0, 10], 10, 10)
 
 
 def test_route_yield_is_ordered_multiplicative_and_complete():
@@ -342,5 +361,20 @@ def test_dedicated_qualification_combines_both_policy_gates():
 
 
 def test_performance_summary_uses_filtered_takt_and_ordered_route_yield():
-    summary = performance_summary([0, 10, 20], 5, 20, [StepYield("A", 10, 9), StepYield("B", 9, 8)], ["A", "B"])
-    assert summary.takt.takt == 10 and summary.route_yield == pytest.approx(0.8)
+    # The caller's window passes through unchanged: completion at 0 is before
+    # the window and must not be pulled in by resetting the start to history.
+    summary = performance_summary([0, 10, 20], 5, 21, [StepYield("A", 10, 9), StepYield("B", 9, 8)], ["A", "B"])
+    assert summary.takt.takt == 10
+    assert summary.takt.completion_count == 2 and summary.takt.interval_count == 1
+    assert summary.route_yield == pytest.approx(0.8)
+
+
+def test_performance_summary_keeps_caller_window_with_insufficient_or_empty_samples():
+    steps = [StepYield("A", 10, 9), StepYield("B", 9, 8)]
+    # Plenty of history, but only one completion inside the requested window.
+    summary = performance_summary([-30, -20, -10, 5], 0, 10, steps, ["A", "B"])
+    assert summary.takt.takt is None and summary.takt.completion_count == 1
+    # No completions at all: window is preserved instead of expanded.
+    summary = performance_summary([], 0, 10, steps, ["A", "B"])
+    assert summary.takt.takt is None and summary.takt.completion_count == 0
+    assert summary.route_yield == pytest.approx(0.8)

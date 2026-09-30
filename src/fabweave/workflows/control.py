@@ -259,5 +259,4 @@ def performance_summary(
     steps: list[StepYield],
     expected_steps: list[str],
 ) -> PerformanceSummary:
-    effective_start = min(completions) if completions else window_start
-    return PerformanceSummary(takt_result(completions, effective_start, window_end), route_yield(steps, expected_steps))
+    return PerformanceSummary(takt_result(completions, window_start, window_end), route_yield(steps, expected_steps))
