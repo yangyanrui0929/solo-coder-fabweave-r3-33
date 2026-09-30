@@ -27,7 +27,7 @@ from fabweave.reticle.reservation import Reservation, ReservationBook
 from fabweave.rework.authorization import ReworkPolicy, authorization_decision
 from fabweave.shipment.commit import CommitLedger
 from fabweave.spc.control import western_electric_rules
-from fabweave.takt.monitor import takt_result
+from fabweave.takt.monitor import rolling_takt, takt_result
 from fabweave.yielding.rollup import StepYield, route_yield
 from fabweave.workflows.control import (
     chamber_sample_decision,
@@ -248,6 +248,28 @@ def test_takt_uses_intervals_and_reports_duplicate_completions():
     assert result.takt == 10 and result.interval_count == 2 and result.duplicate_count == 1
 
 
+def test_rolling_takt_excludes_completions_before_window_start():
+    # 0 is before the window; including it would yield (104-0)/3 instead of 2.
+    assert rolling_takt([0, 100, 102, 104], 100, 104) == 2.0
+    result = takt_result([-5, 10, 10, 20, 20], 10, 20)
+    assert result.completion_count == 2 and result.interval_count == 1 and result.duplicate_count == 2
+
+
+def test_takt_window_is_inclusive_at_both_boundaries_and_rejects_invalid_windows():
+    assert takt_result([5, 10, 15], 5, 15).completion_count == 3
+    for window_start, window_end in ((10, 10), (20, 10)):
+        with pytest.raises(ValueError):
+            takt_result([0, 10, 20], window_start, window_end)
+
+
+def test_takt_returns_none_when_window_has_fewer_than_two_unique_completions():
+    single = takt_result([7, 7], 0, 20)
+    assert single.takt is None and single.completion_count == 1
+    assert single.interval_count == 0 and single.duplicate_count == 1
+    empty = takt_result([], 0, 10)
+    assert empty.takt is None and empty.completion_count == 0
+
+
 def test_route_yield_is_ordered_multiplicative_and_complete():
     steps = [StepYield("B", 100, 80), StepYield("A", 100, 90)]
     assert route_yield(steps, ["A", "B"]) == pytest.approx(0.72)
@@ -344,3 +366,19 @@ def test_dedicated_qualification_combines_both_policy_gates():
 def test_performance_summary_uses_filtered_takt_and_ordered_route_yield():
     summary = performance_summary([0, 10, 20], 5, 20, [StepYield("A", 10, 9), StepYield("B", 9, 8)], ["A", "B"])
     assert summary.takt.takt == 10 and summary.route_yield == pytest.approx(0.8)
+
+
+def test_performance_summary_keeps_caller_window_even_with_earlier_history():
+    steps = [StepYield("A", 10, 9), StepYield("B", 9, 8)]
+    # The completion at 0 lies before the requested window and must not enter takt or counts.
+    summary = performance_summary([0, 10, 20], 5, 20, steps, ["A", "B"])
+    assert summary.takt.completion_count == 2 and summary.takt.interval_count == 1 and summary.takt.duplicate_count == 0
+    # Earlier history cannot widen the window from 100 back to 0.
+    summary = performance_summary([0, 0, 100, 200], 100, 200, steps, ["A", "B"])
+    assert summary.takt.completion_count == 2 and summary.takt.takt == 100
+    # Plenty of pre-window history, but the actual window is sample-insufficient.
+    summary = performance_summary([0, 10, 20], 18, 40, steps, ["A", "B"])
+    assert summary.takt.takt is None and summary.takt.completion_count == 1
+    # No completions at all must not reset the window or raise.
+    summary = performance_summary([], 5, 20, steps, ["A", "B"])
+    assert summary.takt.takt is None and summary.takt.completion_count == 0
